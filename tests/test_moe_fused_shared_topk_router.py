@@ -227,6 +227,23 @@ def _run_contract_checks() -> None:
     assert combined_jit_calls[0]["shared_expert_gate_output"] is None
     assert combined_jit_calls[0]["num_fused_shared_experts"] == 1
 
+    # The GLM-288 optimization is optional: a capability/layout miss must use
+    # the reference grouped-topk path rather than turn serving into an error.
+    with mock.patch.object(grouped_router.current_platform, "is_musa", return_value=True):
+        fallback_weights, fallback_ids = grouped_router.grouped_topk(
+            hidden_states,
+            torch.randn(2, 288),
+            topk=8,
+            renormalize=True,
+            num_expert_group=1,
+            topk_group=1,
+            scoring_func="sigmoid",
+            e_score_correction_bias=torch.zeros(288),
+            use_glm5_moe_router=True,
+        )
+    assert fallback_weights.shape == (2, 8)
+    assert fallback_ids.shape == (2, 8)
+
 
 def test_router_contract_in_isolated_process() -> None:
     env = os.environ.copy()

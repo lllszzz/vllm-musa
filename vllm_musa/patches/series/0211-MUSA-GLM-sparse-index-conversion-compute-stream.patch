@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: musa <musa@local>
+Date: Sat, 31 Oct 2026 19:14:17 +0800
+Subject: [PATCH] MUSA: GLM sparse index conversion compute stream
+
+---
+ vllm/v1/attention/backends/mla/index_group.py | 33 ++++++++++++++-----
+ 1 file changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/vllm/v1/attention/backends/mla/index_group.py b/vllm/v1/attention/backends/mla/index_group.py
+index 0dfda0ded9..a21b6b0561 100644
+--- a/vllm/v1/attention/backends/mla/index_group.py
++++ b/vllm/v1/attention/backends/mla/index_group.py
+@@ -11,6 +11,7 @@ import torch
+ from vllm import _custom_ops as ops
+ from vllm.config import VllmConfig
+ from vllm.forward_context import in_piecewise_cudagraph
++from vllm.platforms import current_platform
+ from vllm.utils.torch_utils import current_stream
+ from vllm.v1.attention.backend import max_decode_query_len
+ from vllm.v1.attention.backends.mla.sparse_utils import (
+@@ -137,12 +138,8 @@ class SparseMLAIndexGroup:
+         physical_topk_indices = self.physical_topk_indices[:num_tokens]
+         valid_topk_counts = self.valid_topk_counts[:num_tokens]
+         compute_stream = current_stream()
+-        if layer_index == 0:
+-            if self.has_indexer and not in_piecewise_cudagraph():
+-                self.side_stream.wait_event(self.logical_topk_ready)
+-            else:
+-                self.side_stream.wait_stream(compute_stream)
+-            with self.side_stream:
++        if current_platform.is_musa() and self.has_indexer:
++            if layer_index == 0:
+                 triton_convert_req_index_to_global_index(
+                     req_id_per_token,
+                     block_table,
+@@ -156,8 +153,28 @@ class SparseMLAIndexGroup:
+                         valid_topk_counts if return_valid_counts else None
+                     ),
+                 )
+-                self.physical_topk_ready.record(self.side_stream)
+-        compute_stream.wait_event(self.physical_topk_ready)
++        else:
++            if layer_index == 0:
++                if self.has_indexer and not in_piecewise_cudagraph():
++                    self.side_stream.wait_event(self.logical_topk_ready)
++                else:
++                    self.side_stream.wait_stream(compute_stream)
++                with self.side_stream:
++                    triton_convert_req_index_to_global_index(
++                        req_id_per_token,
++                        block_table,
++                        logical_topk_indices,
++                        BLOCK_SIZE=block_size,
++                        BLOCK_STRIDE_ROWS=block_stride_rows,
++                        NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
++                        return_valid_counts=return_valid_counts,
++                        out=physical_topk_indices,
++                        valid_counts_out=(
++                            valid_topk_counts if return_valid_counts else None
++                        ),
++                    )
++                    self.physical_topk_ready.record(self.side_stream)
++            compute_stream.wait_event(self.physical_topk_ready)
+ 
+         if return_valid_counts:
+             return physical_topk_indices, valid_topk_counts

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 
 
 class ModelFamily(str, Enum):
@@ -68,9 +68,18 @@ class OptimizationFeature(str, Enum):
     QWEN35_INTERLEAVED_MROPE_QK = "qwen3.5_3.6.interleaved_mrope_qk"
     QWEN35_VISION_ROTARY_BF16 = "qwen3.5_3.6.vision_rotary_bf16"
     GLM5_SPARSE_MLA_MATE_PREFILL = "glm5.sparse_mla_mate_prefill"
+    GLM5_FLASH_SPARSE_MLA_MODEL1 = "glm5_flash.sparse_mla_model1"
+    GLM5_SPARSE_INDEXER_TOPK = "glm5.sparse_indexer_topk"
+    GLM5_MOE_ROUTER_288 = "glm5.moe_router_288"
     GLM5_EAGER_MCCL_INIT = "glm5.eager_mccl_init"
     PADDLEOCR_VL_ROTARY = "paddleocr_vl.rotary"
     HYBRID_SEPARATE_MAMBA_POOL = "hybrid.separate_mamba_pool"
+
+
+class GLMSparseMLARoute(IntEnum):
+    DISABLED = 0
+    MATE_PREFILL = 1
+    FLASH_MODEL1 = 2
 
 
 @dataclass(frozen=True, slots=True)

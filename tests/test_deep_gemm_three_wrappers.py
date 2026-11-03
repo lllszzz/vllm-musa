@@ -98,6 +98,94 @@ def test_provider_identity_and_grouped_surface() -> None:
     assert getattr(provider, "__version__", None)
 
 
+def test_legacy_fp8_mqa_fallback_is_selected_for_fp8_only_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, Any] = {}
+
+    def implementation(*args: Any, **kwargs: Any) -> str:
+        received["args"] = args
+        received["kwargs"] = kwargs
+        return "legacy-result"
+
+    monkeypatch.setattr(deep_gemm, "_lazy_init", lambda: None)
+    monkeypatch.setattr(deep_gemm, "_fp8_fp4_mqa_logits_impl", None)
+    monkeypatch.setattr(deep_gemm, "_fp8_mqa_logits_impl", implementation)
+    monkeypatch.setattr(deep_gemm.current_platform, "is_musa", lambda: True)
+    q_values = object()
+    q = (q_values, None)
+    assert deep_gemm.fp8_fp4_mqa_logits(
+        q, "kv", "weights", "cu_k", "cu_e", clean_logits=True
+    ) == "legacy-result"
+    assert received == {
+        "args": (q_values, "kv", "weights", "cu_k", "cu_e"),
+        "kwargs": {"clean_logits": True},
+    }
+
+
+def test_legacy_mqa_fallback_is_disabled_off_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deep_gemm, "_lazy_init", lambda: None)
+    monkeypatch.setattr(deep_gemm, "_fp8_fp4_mqa_logits_impl", None)
+    monkeypatch.setattr(deep_gemm, "_fp8_mqa_logits_impl", lambda *args, **kwargs: "wrong")
+    monkeypatch.setattr(deep_gemm.current_platform, "is_musa", lambda: False)
+
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        deep_gemm.fp8_fp4_mqa_logits(
+            (object(), None), "kv", "weights", "cu_k", "cu_e", clean_logits=True
+        )
+
+
+def test_legacy_paged_mqa_requires_fp8_only_query_and_no_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def implementation(*args: Any, **kwargs: Any) -> str:
+        calls.append((args, kwargs))
+        return "legacy-paged"
+
+    monkeypatch.setattr(deep_gemm, "_lazy_init", lambda: None)
+    monkeypatch.setattr(deep_gemm, "_fp8_fp4_paged_mqa_logits_impl", None)
+    monkeypatch.setattr(deep_gemm, "_fp8_paged_mqa_logits_impl", implementation)
+    monkeypatch.setattr(deep_gemm.current_platform, "is_musa", lambda: True)
+    block_tables = torch.empty((1, 1), dtype=torch.int32)
+    assert deep_gemm.fp8_fp4_paged_mqa_logits(
+        ("q", None), "kv", "weights", "lens", block_tables, "schedule", 4096, True
+    ) == "legacy-paged"
+    assert len(calls) == 1
+    calls.clear()
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        deep_gemm.fp8_fp4_paged_mqa_logits(
+            ("q", "scale"), "kv", "weights", "lens", block_tables, "schedule", 4096, True
+        )
+    assert not calls
+
+
+def test_non_musa_paged_missing_path_does_not_unpack_or_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deep_gemm, "_lazy_init", lambda: None)
+    monkeypatch.setattr(deep_gemm, "_fp8_fp4_paged_mqa_logits_impl", None)
+    monkeypatch.setattr(
+        deep_gemm, "_fp8_paged_mqa_logits_impl", lambda *args: "wrong"
+    )
+    monkeypatch.setattr(deep_gemm.current_platform, "is_musa", lambda: False)
+
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        deep_gemm.fp8_fp4_paged_mqa_logits(
+            object(), "kv", "weights", "lens", None, "schedule", 4096, True
+        )
+
+
+def test_musa_paged_mqa_page_size_is_legacy_64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deep_gemm.current_platform, "is_musa", lambda: True)
+    assert deep_gemm.get_paged_mqa_page_sizes() == (64,)
+
+
 def _musa_available() -> bool:
     return bool(getattr(torch.version, "musa", None)) and hasattr(torch, "musa")
 

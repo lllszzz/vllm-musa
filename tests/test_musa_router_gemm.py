@@ -39,6 +39,7 @@ from vllm_musa.model_executor.layers.fused_moe.router.musa_router_gemm import ( 
 )
 
 HIDDEN, EXPERTS = 2688, 128
+GLM5_HIDDEN, GLM5_EXPERTS = 4096, 288
 M_VALUES = (1, 7, 115, 512)
 
 # (experts, hidden) of gates this kernel must NOT touch, with the model family that
@@ -74,24 +75,56 @@ def test_guard_declines_foreign_gate_shapes(experts: int, hidden: int) -> None:
 
 
 @requires_musa
-def test_guard_declines_unsupported_dtypes_and_layouts() -> None:
+@pytest.mark.parametrize("m", (7, 135))
+def test_glm5_gate_shape_keeps_vendor_router_gemm(m: int) -> None:
+    torch.manual_seed(100083)
+    x = torch.randn((m, GLM5_HIDDEN), device="musa", dtype=torch.bfloat16)
+    w = torch.randn(
+        (GLM5_EXPERTS, GLM5_HIDDEN), device="musa", dtype=torch.float32
+    )
+    # GLM's MUSA top-k contract remains enabled, but the newly added router
+    # GEMM tier is disabled after the TP8 combined-route serving crash.
+    assert router_gate_fp32(x, w) is None
+
+
+@requires_musa
+def test_glm5_topk_accepts_meta_trace_inputs() -> None:
+    from vllm_musa.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        _can_use_musa_jit_topk,
+    )
+
+    hidden = torch.empty((7, GLM5_HIDDEN), device="meta", dtype=torch.bfloat16)
+    logits = torch.empty((7, GLM5_EXPERTS), device="meta", dtype=torch.float32)
+    bias = torch.empty((GLM5_EXPERTS,), device="meta", dtype=torch.float32)
+    assert _can_use_musa_jit_topk(
+        hidden, logits, 8, bias, allow_meta_trace=True
+    )
+
+
+@requires_musa
+def test_glm5_topk_rejects_mixed_devices() -> None:
+    from vllm_musa.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        _can_use_musa_jit_topk,
+    )
+
+    hidden = torch.empty((7, GLM5_HIDDEN), device="meta", dtype=torch.bfloat16)
+    logits = torch.empty((7, GLM5_EXPERTS), dtype=torch.float32)
+    bias = torch.empty((GLM5_EXPERTS,), dtype=torch.float32)
+    assert not _can_use_musa_jit_topk(hidden, logits, 8, bias)
+
+
+@requires_musa
+def test_guard_accepts_supported_weights_and_rejects_bad_layouts() -> None:
     x = torch.zeros((4, HIDDEN), device="musa", dtype=torch.bfloat16)
     w = torch.zeros((EXPERTS, HIDDEN), device="musa", dtype=torch.float32)
-    # A BF16 or FP16 gate weight belongs to a different tier.
     assert router_gate_fp32(x, w.to(torch.bfloat16)) is None
     assert router_gate_fp32(x, w.to(torch.float16)) is None
-    # Narrowed activations are declined; FP32 and BF16 are the supported inputs.
     assert router_gate_fp32(x.to(torch.float16), w) is None
-    # A mismatched hidden size is declined; an empty batch is served with an empty
-    # result (idle steps are legal and must not fall through to another tier).
     assert router_gate_fp32(x[:, :1024].contiguous(), w) is None
     empty = router_gate_fp32(x[:0], w)
     assert empty is not None and tuple(empty.shape) == (0, EXPERTS)
-    # Non-contiguous operands are declined rather than silently reinterpreted.
     wide = torch.zeros((EXPERTS, 2 * HIDDEN), device="musa", dtype=torch.float32)
     assert router_gate_fp32(x, wide[:, ::2]) is None
-    # The one supported combination is accepted, which keeps every "is None" above
-    # meaningful.
     assert router_gate_fp32(x, w) is not None
 
 

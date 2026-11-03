@@ -2,12 +2,18 @@ import math
 
 import torch
 from vllm import envs as vllm_envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_topk,
     fused_topk_bias,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
+
+from vllm_musa.optimization_contract import (
+    OptimizationFeature,
+    bind_optimization_contract,
+)
 
 try:
     from mate import moe_fused_gate as mate_moe_fused_gate
@@ -24,11 +30,20 @@ def _can_use_musa_jit_topk(
     gating_output: torch.Tensor,
     topk: int,
     correction_bias: torch.Tensor | None,
+    allow_meta_trace: bool = False,
 ) -> bool:
+    """Check MUSA top-k eligibility for runtime or tracing operands.
+
+    ``allow_meta_trace`` admits FakeTensor/meta operands during Dynamo shape
+    tracing only; it does not make the kernel executable on a meta device.
+    """
     return (
         current_platform.is_musa()
         and hidden_states.device == gating_output.device
-        and gating_output.device.type == "musa"
+        and (
+            hidden_states.device.type == "musa"
+            or (allow_meta_trace and hidden_states.device.type == "meta")
+        )
         and hidden_states.dim() == 2
         and gating_output.dim() == 2
         and hidden_states.shape[0] == gating_output.shape[0]
@@ -66,8 +81,11 @@ def _musa_jit_fused_topk(
     scoring_func: str = "softmax",
     shared_expert_gate_output: torch.Tensor | None = None,
     num_fused_shared_experts: int = 0,
+    allow_meta_trace: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    if not _can_use_musa_jit_topk(hidden_states, gating_output, topk, correction_bias):
+    if not _can_use_musa_jit_topk(
+        hidden_states, gating_output, topk, correction_bias, allow_meta_trace=allow_meta_trace
+    ):
         return None
 
     has_shared_experts = (
@@ -164,6 +182,11 @@ def _compute_routing(
     input_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute routing using grouped top-k."""
+    contract = getattr(self, "_musa_optimization_contract", None)
+    if contract is None:
+        contract = bind_optimization_contract(
+            self, get_current_vllm_config_or_none()
+        )
 
     def valid_grouping() -> bool:
         # Check if num_experts is greater than num_expert_group
@@ -184,6 +207,7 @@ def _compute_routing(
                 indices_type=indices_type,
                 correction_bias=self.e_score_correction_bias.data,
                 scoring_func=scoring_func,
+                allow_meta_trace=contract.prefers(OptimizationFeature.GLM5_MOE_ROUTER_288),
             )
             if jit_result is not None:
                 topk_weights, topk_ids = jit_result
@@ -210,6 +234,7 @@ def _compute_routing(
                 renormalize=self.renormalize,
                 indices_type=indices_type,
                 scoring_func=scoring_func,
+                allow_meta_trace=contract.prefers(OptimizationFeature.GLM5_MOE_ROUTER_288),
             )
             if jit_result is not None:
                 topk_weights, topk_ids = jit_result
@@ -239,6 +264,9 @@ def _compute_routing(
         routed_scaling_factor=self.routed_scaling_factor,
         e_score_correction_bias=self.e_score_correction_bias,
         num_fused_shared_experts=self.num_fused_shared_experts,
+        use_glm5_moe_router=contract.prefers(
+            OptimizationFeature.GLM5_MOE_ROUTER_288
+        ),
     )
     # ========================== END ==========================
 
@@ -396,17 +424,20 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     num_fused_shared_experts: int = 0,
+    use_glm5_moe_router: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dispatch MUSA grouped top-k before entering the compiled Torch fallback."""
-    # Nemotron 3.5 uses one expert group with one selected group, so grouped
-    # routing reduces to the biased sigmoid top-k operation. Keep this case on
-    # the native MUSA kernel; multi-group routing uses the implementation below.
+    # Single-group routing uses the native MUSA top-k operation for the
+    # existing Nemotron shape and the contract-enabled GLM-5.3-Flash shape.
     if (
         current_platform.is_musa()
         and scoring_func == "sigmoid"
         and num_expert_group == 1
         and topk_group == 1
-        and gating_output.shape[1] == 128
+        and (
+            gating_output.shape[1] == 128
+            or (gating_output.shape[1] == 288 and use_glm5_moe_router)
+        )
         and num_fused_shared_experts == 0
         and e_score_correction_bias is not None
     ):
@@ -418,6 +449,7 @@ def grouped_topk(
             indices_type=torch.int32,
             correction_bias=e_score_correction_bias,
             scoring_func=scoring_func,
+            allow_meta_trace=use_glm5_moe_router,
         )
         if jit_result is not None:
             topk_weights, topk_ids = jit_result

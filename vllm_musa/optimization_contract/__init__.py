@@ -7,7 +7,7 @@ from .policy import (
     deepseek_v4_long_prefill_tp_partition_min_seq_len,
     deepseek_v4_prefill_score_deepgemm_enabled,
 )
-from .glm import resolve_glm_contract
+from .glm import resolve_glm_contract, resolve_glm_sparse_mla_route
 from .resolver import (
     bind_optimization_contract,
     prefers_optimization,
@@ -15,6 +15,7 @@ from .resolver import (
 )
 from .types import (
     ExecutionSignature,
+    GLMSparseMLARoute,
     ModelFamily,
     ModelRole,
     ModelSignature,
@@ -24,6 +25,7 @@ from .types import (
 
 __all__ = [
     "ExecutionSignature",
+    "GLMSparseMLARoute",
     "ModelFamily",
     "ModelRole",
     "ModelSignature",
@@ -38,4 +40,5 @@ __all__ = [
     "prefers_optimization",
     "resolve_optimization_contract",
     "resolve_glm_contract",
+    "resolve_glm_sparse_mla_route",
 ]

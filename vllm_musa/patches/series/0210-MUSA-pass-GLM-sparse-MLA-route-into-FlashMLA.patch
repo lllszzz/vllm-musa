@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: musa <musa@local>
+Date: Sat, 31 Oct 2026 20:27:36 +0800
+Subject: [PATCH] MUSA: pass GLM sparse MLA route into FlashMLA
+
+---
+ .../attention/backends/mla/flashmla_sparse.py | 50 +++++++++++++++----
+ 1 file changed, 39 insertions(+), 11 deletions(-)
+
+diff --git a/vllm/v1/attention/backends/mla/flashmla_sparse.py b/vllm/v1/attention/backends/mla/flashmla_sparse.py
+index 7aa3d19e9a..057b711e50 100644
+--- a/vllm/v1/attention/backends/mla/flashmla_sparse.py
++++ b/vllm/v1/attention/backends/mla/flashmla_sparse.py
+@@ -771,9 +771,26 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
+             self.supports_dense_mha_prefill = False
+ 
+         vllm_config = get_current_vllm_config()
+-        from vllm_musa.optimization_contract import OptimizationFeature, bind_optimization_contract
+-        optimization_contract = bind_optimization_contract(self, vllm_config)
+-        self._is_glm_dsa = optimization_contract.prefers(OptimizationFeature.GLM5_SPARSE_MLA_MATE_PREFILL)
++        if current_platform.is_musa():
++            from vllm_musa.optimization_contract import (
++                bind_optimization_contract,
++                resolve_glm_sparse_mla_route,
++            )
++
++            bind_optimization_contract(self, vllm_config)
++            self._glm_sparse_mla_route = resolve_glm_sparse_mla_route(
++                self._musa_optimization_contract
++            )
++        else:
++            from vllm_musa.optimization_contract import (
++                OptimizationFeature,
++                bind_optimization_contract,
++            )
++
++            optimization_contract = bind_optimization_contract(self, vllm_config)
++            self._is_glm_dsa = optimization_contract.prefers(
++                OptimizationFeature.GLM5_SPARSE_MLA_MATE_PREFILL
++            )
+         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+         q_concat_heads = num_heads
+         if not is_quantized_kv_cache(kv_cache_dtype):
+@@ -1384,14 +1401,25 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
+             q = q_padded
+ 
+         topk_indices = topk_indices.view(num_tokens, 1, -1)
+-        output, _, lse = flash_mla_sparse_fwd(
+-            q,
+-            kv_c_and_k_pe_cache,
+-            topk_indices,
+-            self.softmax_scale,
+-            topk_length=topk_length,
+-            out=out,
+-        )
++        if current_platform.is_musa():
++            output, _, lse = flash_mla_sparse_fwd(
++                q,
++                kv_c_and_k_pe_cache,
++                topk_indices,
++                self.softmax_scale,
++                topk_length=topk_length,
++                out=out,
++                glm_sparse_mla_route=self._glm_sparse_mla_route.value,
++            )
++        else:
++            output, _, lse = flash_mla_sparse_fwd(
++                q,
++                kv_c_and_k_pe_cache,
++                topk_indices,
++                self.softmax_scale,
++                topk_length=topk_length,
++                out=out,
++            )
+ 
+         output = output[:, :actual_num_heads, :]
+         lse = lse[:, :actual_num_heads]

@@ -321,8 +321,11 @@ source-level and MUSA long-context graph/model regression before inclusion.
 | `0206-MUSA-size-the-dedicated-Mamba-pool-per-align-mode-sn.patch` | v0.32 upstream update | size the dedicated Mamba pool per align-mode snapshot |
 | `0207-MUSA-optimize-hybrid-attention-page-size-fastpath.patch` | v0.32 upstream update | optimize hybrid attention page-size fastpath |
 | `0208-MUSA-handle-expandable-segments-around-graph-capture.patch` | v0.32 upstream update | handle expandable segments around graph capture |
+| `0209-MUSA-enable-GLM-5.3-Flash-on-vLLM-0.32.0.patch` | v0.32 new/updated | enable GLM-5.3-Flash on vLLM 0.32.0 |
+| `0210-MUSA-pass-GLM-sparse-MLA-route-into-FlashMLA.patch` | v0.32 new/updated | pass GLM sparse MLA route into FlashMLA |
+| `0211-MUSA-run-GLM-sparse-index-conversion-on-compute-stream.patch` | v0.32 new/updated | run GLM sparse index conversion on compute stream |
 
-Currently **208 patches** and **0 upstream entries** in `upstream/`.
+Currently **211 patches** and **0 upstream entries** in `upstream/`.
 
 The candidate is rebased onto vllm-musa `a1153f9f` with the same immutable
 vLLM pin. Independent application of upstream's original 58-patch chain and

@@ -1,8 +1,8 @@
 # vLLM-MUSA serving recipes
 
-Copy-ready configurations for serving supported models with vLLM-MUSA on
-S5000 GPUs. Revalidate the exact image, model checkpoint, and workload before
-treating a profile as a production recommendation.
+Copy-ready configurations for serving supported models with vLLM-MUSA v0.28.0-dev
+on S5000 GPUs. Revalidate the exact image, model checkpoint, and workload
+before treating a profile as a production recommendation.
 
 > [!TIP]
 > Start with the recipe unchanged. Adjust the model path and served-model name
@@ -11,19 +11,17 @@ treating a profile as a production recommendation.
 The profiles use the documented 4K-input/1K-output workload shape and bounded
 concurrency. Recheck first-token latency, per-token latency, and decode
 interference when your traffic shape or concurrency target differs.
-Recipes written for the v0.32 line follow its scheduler interface; options
-removed from that line are intentionally not carried over.
+The commands follow the v0.28 scheduler interface; options removed from this
+release line are intentionally not carried over.
 
 ## Before you start
 
-- Run inside a release image of the same line as the page, e.g.
-  `registry.mthreads.com/mcconline/inference/vllm/vllm-openai:v0.32.0` for the
-  v0.32 recipes, or an equivalent installation, unless the recipe names its
-  own image.
-- Apart from the image a recipe names, the registry tags are published
-  independently of this branch and may carry a different dependency revision;
-  verify package versions, or build the local image described in the
-  installation guide for exact branch parity.
+- Run inside the v0.32.0 release image
+  `registry.mthreads.com/mcconline/inference/vllm/vllm-openai:v0.32.0`, or an
+  equivalent installation.
+- The registry tag is published independently of this branch and may carry a
+  different dependency revision; verify package versions, or build the local
+  image described in the installation guide for exact branch parity.
 - Mount the checkpoint under `/models` or update the path in the command.
 - Use the tensor-parallelism size documented in each recipe; increase TP only
   when memory requires it.
@@ -72,6 +70,7 @@ See the [OCR cookbook index](ocr/README.md) for the three model recipes.
 | Model | Precision | Hardware | Recommended profile | Recipe |
 |---|---|---|---|---|
 | GLM-5.3 | FP8 | 16x S5000, TP8 + PP2 | FULL_DECODE_ONLY | [Open recipe](glm/glm-5.3-fp8.md) |
+| GLM-5.3-Flash | FP8 | 8x S5000, TP8 | v0.32.0, FULL_DECODE_ONLY | [Open recipe](glm/glm-5.3-flash-fp8.md) |
 | GLM-5.2 | FP8 | 16x S5000, TP8 + PP2 | Same as GLM-5.3 | [Open recipe](glm/glm-5.3-fp8.md) |
 
 GLM-5.2 and GLM-5.3 share the serving topology and graph profile. Their
@@ -87,16 +86,6 @@ template workaround, while GLM-5.2 uses its checkpoint template with
 
 The Nemotron profile serves one request at a time and targets per-token decode
 latency.
-
-## DiffusionGemma
-
-| Model | Precision | Hardware | Speculative decoding | Recipe |
-|---|---|---|---|---|
-| DiffusionGemma-26B-A4B-it | BF16 | 1x S5000, TP1 | Off | [Open recipe](diffusiongemma/diffusiongemma-26b-a4b-it.md) |
-
-The recipe uses the checkpoint's own canvas (256 tokens, 48 steps) and the
-`/v1/systemone` endpoint that vLLM v0.32 ships, so one server answers both
-`/v1/chat/completions` and structured reads.
 
 ## Verify a server
 

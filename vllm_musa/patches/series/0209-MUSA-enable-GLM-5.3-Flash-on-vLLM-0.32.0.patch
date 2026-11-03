@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: musa <musa@local>
+Date: Sat, 31 Oct 2026 20:36:43 +0800
+Subject: [PATCH] MUSA: enable GLM-5.3-Flash on vLLM 0.32.0
+
+---
+ vllm/models/glm5next/nvidia/sparse_indexer.py | 33 ++++++++---
+ vllm/utils/deep_gemm.py                       | 55 +++++++++++++++++--
+ 2 files changed, 74 insertions(+), 14 deletions(-)
+
+diff --git a/vllm/models/glm5next/nvidia/sparse_indexer.py b/vllm/models/glm5next/nvidia/sparse_indexer.py
+index 154fdcda90..7819104a21 100644
+--- a/vllm/models/glm5next/nvidia/sparse_indexer.py
++++ b/vllm/models/glm5next/nvidia/sparse_indexer.py
+@@ -373,6 +373,14 @@ def sparse_attn_indexer_kpool(
+ 
+             if logits.shape[1] == 0:
+                 topk_dst.fill_(-1)
++            elif current_platform.is_musa():
++                # MUSA has no _C.top_k_per_row_prefill; use the existing
++                # MUSA top-k-only op, which matches torch.topk for these rows.
++                from vllm_musa import _custom_ops as _musa_ops
++
++                _musa_ops.sparse_indexer_topk(
++                    logits, cu_seqlen_ks, cu_seqlen_ke, topk_dst, select_k
++                )
+             else:
+                 torch.ops._C.top_k_per_row_prefill(
+                     logits,
+@@ -623,14 +631,23 @@ def sparse_attn_indexer_kpool(
+         # honors kernel_config.sparse_indexer_topk_backend and picks between
+         # cooperative/persistent by batch size instead of always taking the
+         # same kernel.
+-        get_indexer_topk(topk_backend)(
+-            logits,
+-            seq_lens,
+-            next_n,
+-            topk_dst,
+-            select_k,
+-            attn_metadata_narrowed.max_seq_len,
+-        )
++        if current_platform.is_musa():
++            # MUSA has no _C.top_k_per_row_decode; use the existing
++            # MUSA top-k-only decode op on the flattened (rows, k) logits.
++            from vllm_musa import _custom_ops as _musa_ops
++
++            _musa_ops.sparse_indexer_topk_decode(
++                logits, seq_lens.reshape(-1), topk_dst, select_k
++            )
++        else:
++            get_indexer_topk(topk_backend)(
++                logits,
++                seq_lens,
++                next_n,
++                topk_dst,
++                select_k,
++                attn_metadata_narrowed.max_seq_len,
++            )
+         _merge_dcp_topk_global(
+             logits,
+             topk_dst,
+diff --git a/vllm/utils/deep_gemm.py b/vllm/utils/deep_gemm.py
+index f3f1633901..24d28bc54b 100644
+--- a/vllm/utils/deep_gemm.py
++++ b/vllm/utils/deep_gemm.py
+@@ -33,6 +33,9 @@ _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
+ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
+     """KV page sizes (in cache entries) the paged-MQA logits kernels take (only
+     64 on SM120); larger storage blocks are split into one of these."""
++    if current_platform.is_musa():
++        # MATE 0.2.7 legacy paged-MQA JIT supports block_kv == 64 only.
++        return (64,)
+     return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
+ 
+ 
+@@ -169,6 +172,8 @@ _fp8_einsum_impl: Callable[..., Any] | None = None
+ _grouped_impl: Callable[..., Any] | None = None
+ _grouped_masked_impl: Callable[..., Any] | None = None
+ _grouped_fp4_impl: Callable[..., Any] | None = None
++_fp8_mqa_logits_impl: Callable[..., Any] | None = None
++_fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
+ _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
+ _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
+ _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+@@ -249,6 +254,7 @@ def _lazy_init() -> None:
+     global _cublaslt_gemm_nt_impl
+     global _fp8_gemm_nt_impl, _fp8_einsum_impl
+     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
++    global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
+     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
+     global _get_paged_mqa_logits_metadata_impl
+     global _fp8_fp4_sparse_mqa_logits_impl, _fp8_fp4_paged_sparse_mqa_logits_impl
+@@ -271,6 +277,8 @@ def _lazy_init() -> None:
+         or _grouped_impl is not None
+         or _grouped_masked_impl is not None
+         or _grouped_fp4_impl is not None
++        or _fp8_mqa_logits_impl is not None
++        or _fp8_paged_mqa_logits_impl is not None
+         or _fp8_fp4_mqa_logits_impl is not None
+         or _fp8_fp4_paged_mqa_logits_impl is not None
+         or _get_paged_mqa_logits_metadata_impl is not None
+@@ -312,6 +320,10 @@ def _lazy_init() -> None:
+         _dg, "m_grouped_fp8_gemm_nt_masked", None
+     ) or getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+     _grouped_fp4_impl = getattr(_dg, "m_grouped_fp8_fp4_gemm_nt_contiguous", None)
++    # MUSA DeepGEMM/MATE expose only the legacy FP8-only MQA logits names.
++    if current_platform.is_musa():
++        _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
++        _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
+     # DeepGEMM exposes fp8_fp4_*_mqa_logits as the canonical symbols that
+     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
+     _fp8_fp4_mqa_logits_impl = getattr(_dg, "fp8_fp4_mqa_logits", None)
+@@ -661,6 +673,20 @@ def fp8_fp4_mqa_logits(
+     """
+     _lazy_init()
+     if _fp8_fp4_mqa_logits_impl is None:
++        if current_platform.is_musa():
++            q_values, q_scale = q
++            if q_scale is None and _fp8_mqa_logits_impl is not None:
++                logger.info_once(
++                    "Using legacy DeepGEMM fp8_mqa_logits for an FP8-only query."
++                )
++                return _fp8_mqa_logits_impl(
++                    q_values,
++                    kv,
++                    weights,
++                    cu_seqlen_ks,
++                    cu_seqlen_ke,
++                    clean_logits=clean_logits,
++                )
+         return _missing()
+     return _fp8_fp4_mqa_logits_impl(
+         q,
+@@ -768,15 +794,32 @@ def fp8_fp4_paged_mqa_logits(
+ 
+     """
+     _lazy_init()
+-    if _fp8_fp4_paged_mqa_logits_impl is None:
++    if _fp8_fp4_paged_mqa_logits_impl is None and not current_platform.is_musa():
+         return _missing()
+-    # DeepGEMM asserts block_tables.stride(-1)==1. A trailing size-1 dim
+-    # (e.g. block_table shape [B,1] for short seqs under a large block_size)
+-    # can be a transposed view where .contiguous() is a no-op (torch treats the
+-    # size-1 dim's stride as irrelevant) yet stride(-1)!=1, failing the kernel.
+-    # clone to contiguous format to force stride(-1)==1.
++    # Both the unified and the legacy kernels require block_tables.stride(-1)==1.
+     if block_tables.dim() >= 2 and block_tables.stride(-1) != 1:
+         block_tables = block_tables.clone(memory_format=torch.contiguous_format)
++    if _fp8_fp4_paged_mqa_logits_impl is None:
++        q_values, q_scale = q
++        if (
++            q_scale is None
++            and indices is None
++            and _fp8_paged_mqa_logits_impl is not None
++        ):
++            logger.info_once(
++                "Using legacy DeepGEMM fp8_paged_mqa_logits for an FP8-only query."
++            )
++            return _fp8_paged_mqa_logits_impl(
++                q_values,
++                kv_cache,
++                weights,
++                context_lens,
++                block_tables,
++                schedule_metadata,
++                max_model_len,
++                clean_logits,
++            )
++        return _missing()
+     kwargs = {} if indices is None else {"indices": indices}
+     return _fp8_fp4_paged_mqa_logits_impl(
+         q,

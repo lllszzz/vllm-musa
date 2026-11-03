@@ -67,6 +67,20 @@ def test_glm52_indexer_dispatch_has_shortcut_and_safe_fallback_boundary():
     assert "is_glm52_graph_path" in series
 
 
+def test_0055_musa_prefill_and_decode_topk_hunks_are_fail_closed():
+    series = _read(
+        "vllm_musa/patches/series/"
+        "0055-MUSA-enable-GLM-5.3-Flash-on-vLLM-0.32.0.patch"
+    )
+
+    assert "elif current_platform.is_musa():" in series
+    assert "_musa_ops.sparse_indexer_topk(" in series
+    assert "_musa_ops.sparse_indexer_topk_decode(" in series
+    assert "get_indexer_topk(topk_backend)(" in series
+    assert "logits.shape[1] == 0" in series
+    assert "_merge_dcp_topk_global(" in series
+
+
 def test_musa_decode_schedule_metadata_is_precomputed_for_graph_capture():
     series = _read(
         "vllm_musa/patches/series/"
